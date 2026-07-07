@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RL Limitation: Reward Hacking</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 { margin-bottom: 5px; }
+        .info { 
+            margin-bottom: 15px; 
+            font-weight: 500; 
+            text-align: center;
+            max-width: 600px;
+        }
+        .warning {
+            color: #dc3545;
+            font-weight: bold;
+            background: #ffe6e6;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #ffb3b3;
+            margin-bottom: 15px;
+        }
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            width: 100%;
+            max-width: 600px;
+        }
+        button {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 5px;
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #0056b3; }
+        button.reset { background-color: #6c757d; }
+        button.reset:hover { background-color: #5a6268; }
+        button.fast { background-color: #6f42c1; }
+        button.fast:hover { background-color: #59339d; }
+        
+        canvas {
+            background: white;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+            border-radius: 4px;
+        }
+        .stats {
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+            max-width: 600px;
+            font-size: 16px;
+            font-weight: bold;
+            color: #0056b3;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Limitation: Reward Hacking</h1>
+    <div class="info">
+        <strong>The Setup:</strong> The Goal is at the bottom-right (+50 points, ends episode). <br>
+        However, there is a "Coin" at (1,1) that gives +5 points but <em>does not</em> end the episode.<br>
+    </div>
+    <div class="warning">
+        Notice how the Agent finds a loophole! Instead of finishing the task, it learns to bounce back and forth to collect the +5 coin infinitely.
+    </div>
+
+    <div class="controls">
+        <button onclick="togglePlay()" id="playBtn">▶ Auto Play</button>
+        <button class="fast" onclick="instantTrain()">⚡ Train 100 Episodes</button>
+        <button class="reset" onclick="resetEnv()">🔄 Reset</button>
+    </div>
+
+    <canvas id="gridCanvas" width="500" height="500"></canvas>
+    
+    <div class="stats">
+        <span>Episode: <span id="epCount">0</span></span>
+        <span>Steps (Max 50): <span id="stepCount">0</span></span>
+        <span>Current Reward: <span id="rewardCount">0</span></span>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gridCanvas');
+        const ctx = canvas.getContext('2d');
+        const GRID_SIZE = 5;
+        const cellSize = canvas.width / GRID_SIZE;
+        
+        const START = {r: 0, c: 0};
+        const GOAL = {r: 4, c: 4}; // Finish Line
+        const COIN = {r: 1, c: 1}; // The Distraction / Loophole
+        
+        const dr = [-1, 1, 0, 0]; // Up, Down, Left, Right
+        const dc = [0, 0, -1, 1];
+        
+        let Q = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill().map(() => Array(4).fill(0)));
+        let agent = {r: START.r, c: START.c};
+        
+        let isPlaying = false;
+        let playTimer = null;
+        let episodeCount = 0;
+        let stepCount = 0;
+        let currentReward = 0;
+        const MAX_STEPS = 50; // Force end episode if stuck in infinite loop
+
+        function resetEnv() {
+            Q = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill().map(() => Array(4).fill(0)));
+            agent = {r: START.r, c: START.c};
+            episodeCount = 0;
+            stepCount = 0;
+            currentReward = 0;
+            
+            if (isPlaying) {
+                isPlaying = false;
+                clearInterval(playTimer);
+                document.getElementById('playBtn').innerText = "▶ Auto Play";
+            }
+            updateStats();
+            drawGrid();
+        }
+
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            const btn = document.getElementById('playBtn');
+            if (isPlaying) {
+                btn.innerText = "⏸ Pause";
+                playTimer = setInterval(stepAgent, 100); // 100ms per step
+            } else {
+                btn.innerText = "▶ Auto Play";
+                clearInterval(playTimer);
+            }
+        }
+
+        function instantTrain() {
+            const targetEp = episodeCount + 100;
+            while(episodeCount < targetEp) {
+                stepAgent(true);
+            }
+            drawGrid();
+        }
+
+        function updateStats() {
+            document.getElementById('epCount').innerText = episodeCount;
+            document.getElementById('stepCount').innerText = stepCount;
+            document.getElementById('rewardCount').innerText = currentReward;
+        }
+
+        function stepAgent(skipDraw = false) {
+            const alpha = 0.1;
+            const gamma = 0.95; 
+            const epsilon = 0.15; // exploration
+
+            let r = agent.r;
+            let c = agent.c;
+            let a;
+
+            if (Math.random() < epsilon) {
+                a = Math.floor(Math.random() * 4);
+            } else {
+                let maxQ = Math.max(...Q[r][c]);
+                let bestActions = [0,1,2,3].filter(i => Q[r][c][i] === maxQ);
+                a = bestActions[Math.floor(Math.random() * bestActions.length)];
+            }
+
+            let nr = r + dr[a];
+            let nc = c + dc[a];
+
+            if (nr < 0 || nr >= GRID_SIZE || nc < 0 || nc >= GRID_SIZE) {
+                nr = r; nc = c; 
+            }
+
+            let reward = 0;
+            let done = false;
+            
+            if (nr === GOAL.r && nc === GOAL.c) { 
+                reward = 50; 
+                done = true; 
+            } else if (nr === COIN.r && nc === COIN.c) { 
+                reward = 5; 
+                // DOES NOT END GAME - This is the hack!
+            } else {
+                reward = -0.1; // small penalty for moving
+            }
+
+            currentReward += reward;
+
+            let maxNextQ = Math.max(...Q[nr][nc]);
+            Q[r][c][a] += alpha * (reward + gamma * maxNextQ - Q[r][c][a]);
+
+            agent.r = nr;
+            agent.c = nc;
+            stepCount++;
+
+            if (stepCount >= MAX_STEPS) done = true; // Cut off infinite loops
+
+            if (done) {
+                agent.r = START.r;
+                agent.c = START.c;
+                episodeCount++;
+                stepCount = 0;
+                currentReward = 0;
+            }
+
+            if (!skipDraw) {
+                updateStats();
+                drawGrid();
+            }
+        }
+
+        function getColor(qValue) {
+            if (qValue === 0) return "#ffffff";
+            if (qValue > 0) {
+                // Because Q values can go very high due to infinite loop, cap intensity calc
+                let intensity = Math.min(255, Math.floor(qValue * 3));
+                return `rgb(${255 - intensity}, 255, ${255 - intensity})`;
+            } else {
+                let intensity = Math.min(255, Math.floor(Math.abs(qValue) * 10));
+                return `rgb(255, ${255 - intensity}, ${255 - intensity})`;
+            }
+        }
+
+        function drawTriangle(x, y, type, qValue) {
+            ctx.beginPath();
+            let cx = x + cellSize / 2;
+            let cy = y + cellSize / 2;
+            
+            if (type === 'up') { ctx.moveTo(x, y); ctx.lineTo(x + cellSize, y); ctx.lineTo(cx, cy); }
+            if (type === 'down') { ctx.moveTo(x, y + cellSize); ctx.lineTo(x + cellSize, y + cellSize); ctx.lineTo(cx, cy); }
+            if (type === 'left') { ctx.moveTo(x, y); ctx.lineTo(x, y + cellSize); ctx.lineTo(cx, cy); }
+            if (type === 'right') { ctx.moveTo(x + cellSize, y); ctx.lineTo(x + cellSize, y + cellSize); ctx.lineTo(cx, cy); }
+            
+            ctx.fillStyle = getColor(qValue);
+            ctx.fill();
+            ctx.strokeStyle = "#ccc";
+            ctx.stroke();
+
+            ctx.fillStyle = "black";
+            ctx.font = "10px Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            let tx = cx, ty = cy;
+            if (type === 'up') ty -= cellSize * 0.35;
+            if (type === 'down') ty += cellSize * 0.35;
+            if (type === 'left') tx -= cellSize * 0.35;
+            if (type === 'right') tx += cellSize * 0.35;
+            
+            if(Math.abs(qValue) > 0.1) ctx.fillText(qValue.toFixed(1), tx, ty);
+        }
+
+        function drawGrid() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            for (let r = 0; r < GRID_SIZE; r++) {
+                for (let c = 0; c < GRID_SIZE; c++) {
+                    let x = c * cellSize;
+                    let y = r * cellSize;
+
+                    if (r === GOAL.r && c === GOAL.c) {
+                        ctx.fillStyle = "#28a745"; ctx.fillRect(x, y, cellSize, cellSize);
+                        ctx.fillStyle = "white"; ctx.font = "16px Arial"; ctx.fillText("GOAL (+50)", x + cellSize/2, y + cellSize/2);
+                        continue;
+                    }
+                    if (r === COIN.r && c === COIN.c) {
+                        ctx.fillStyle = "#ffc107"; ctx.fillRect(x, y, cellSize, cellSize);
+                        ctx.fillStyle = "black"; ctx.font = "14px Arial"; ctx.fillText("🪙 COIN (+5)", x + cellSize/2, y + cellSize/2);
+                        continue;
+                    }
+
+                    drawTriangle(x, y, 'up', Q[r][c][0]);
+                    drawTriangle(x, y, 'down', Q[r][c][1]);
+                    drawTriangle(x, y, 'left', Q[r][c][2]);
+                    drawTriangle(x, y, 'right', Q[r][c][3]);
+                }
+            }
+
+            // Draw Agent
+            ctx.beginPath();
+            let agentX = agent.c * cellSize + cellSize / 2;
+            let agentY = agent.r * cellSize + cellSize / 2;
+            ctx.arc(agentX, agentY, cellSize * 0.25, 0, 2 * Math.PI);
+            ctx.fillStyle = "#007bff";
+            ctx.fill();
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            
+            ctx.fillStyle = "white";
+            ctx.font = "18px Arial";
+            ctx.fillText("🤖", agentX, agentY + 2);
+            ctx.lineWidth = 1;
+        }
+
+        drawGrid();
+    </script>
+</body>
+</html>
